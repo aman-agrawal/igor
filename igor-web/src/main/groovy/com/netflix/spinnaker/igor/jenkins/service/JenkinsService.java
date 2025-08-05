@@ -43,6 +43,7 @@ import com.netflix.spinnaker.igor.model.Crumb;
 import com.netflix.spinnaker.igor.service.BuildOperations;
 import com.netflix.spinnaker.igor.service.BuildProperties;
 import com.netflix.spinnaker.kork.core.RetrySupport;
+import com.netflix.spinnaker.kork.retrofit.Retrofit2SyncCall;
 import com.netflix.spinnaker.kork.retrofit.exceptions.SpinnakerConversionException;
 import com.netflix.spinnaker.kork.retrofit.exceptions.SpinnakerHttpException;
 import com.netflix.spinnaker.kork.retrofit.exceptions.SpinnakerNetworkException;
@@ -61,12 +62,12 @@ import java.util.Properties;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import lombok.extern.slf4j.Slf4j;
+import okhttp3.ResponseBody;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.web.util.UriUtils;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.SafeConstructor;
-import retrofit.client.Header;
-import retrofit.client.Response;
+import retrofit2.Response;
 
 @Slf4j
 public class JenkinsService implements BuildOperations, BuildProperties {
@@ -113,7 +114,8 @@ public class JenkinsService implements BuildOperations, BuildProperties {
     return circuitBreaker.executeSupplier(
         () -> {
           ProjectsList projectsList =
-              AuthenticatedRequest.allowAnonymous(() -> jenkinsClient.getProjects());
+              AuthenticatedRequest.allowAnonymous(
+                  () -> Retrofit2SyncCall.execute(jenkinsClient.getProjects()));
           if (projectsList == null || projectsList.getList() == null) {
             return new ProjectsList();
           }
@@ -141,14 +143,14 @@ public class JenkinsService implements BuildOperations, BuildProperties {
   }
 
   public JobList getJobs() {
-    return circuitBreaker.executeSupplier(jenkinsClient::getJobs);
+    return circuitBreaker.executeSupplier(() -> Retrofit2SyncCall.execute(jenkinsClient.getJobs()));
   }
 
   public String getCrumb() {
     if (csrf) {
       return circuitBreaker.executeSupplier(
           () -> {
-            Crumb crumb = jenkinsClient.getCrumb();
+            Crumb crumb = Retrofit2SyncCall.execute(jenkinsClient.getCrumb());
             if (crumb != null) {
               return crumb.getCrumb();
             }
@@ -162,37 +164,36 @@ public class JenkinsService implements BuildOperations, BuildProperties {
   public List<Build> getBuilds(String jobName) {
     return circuitBreaker.executeSupplier(
         () ->
-            AuthenticatedRequest.allowAnonymous(() -> jenkinsClient.getBuilds(encode(jobName)))
+            AuthenticatedRequest.allowAnonymous(
+                    () -> Retrofit2SyncCall.execute(jenkinsClient.getBuilds(encode(jobName))))
                 .getList());
   }
 
   public BuildDependencies getDependencies(String jobName) {
-    return circuitBreaker.executeSupplier(() -> jenkinsClient.getDependencies(encode(jobName)));
+    return circuitBreaker.executeSupplier(
+        () -> Retrofit2SyncCall.execute(jenkinsClient.getDependencies(encode(jobName))));
   }
 
-  public Build getBuild(String jobName, Integer buildNumber) {
+  public Build getBuild(String jobName, Long buildNumber) {
     return circuitBreaker.executeSupplier(
-        () -> jenkinsClient.getBuild(encode(jobName), buildNumber));
+        () -> Retrofit2SyncCall.execute(jenkinsClient.getBuild(encode(jobName), buildNumber)));
   }
 
   @Override
-  public GenericBuild getGenericBuild(String jobName, int buildNumber) {
+  public GenericBuild getGenericBuild(String jobName, long buildNumber) {
     return getBuild(jobName, buildNumber).genericBuild(jobName);
   }
 
   @Override
-  public int triggerBuildWithParameters(String job, Map<String, String> queryParameters) {
-    Response response = buildWithParameters(job, queryParameters);
-    if (response.getStatus() != 201) {
+  public long triggerBuildWithParameters(String job, Map<String, String> queryParameters) {
+    Response<ResponseBody> response = buildWithParameters(job, queryParameters);
+    if (response.code() != 201) {
       throw new BuildJobError("Received a non-201 status when submitting job '" + job + "'");
     }
 
     log.info("Submitted build job '{}'", kv("job", job));
     String queuedLocation =
-        response.getHeaders().stream()
-            .filter(h -> h.getName() != null)
-            .filter(h -> h.getName().toLowerCase().equals("location"))
-            .map(Header::getValue)
+        response.headers().values("location").stream()
             .findFirst()
             .orElseThrow(
                 () ->
@@ -200,7 +201,7 @@ public class JenkinsService implements BuildOperations, BuildProperties {
                         "Could not find Location header for job '" + job + "'"));
 
     int lastSlash = queuedLocation.lastIndexOf('/');
-    return Integer.parseInt(queuedLocation.substring(lastSlash + 1));
+    return Long.parseLong(queuedLocation.substring(lastSlash + 1));
   }
 
   @Override
@@ -208,11 +209,12 @@ public class JenkinsService implements BuildOperations, BuildProperties {
     return permissions;
   }
 
-  private ScmDetails getGitDetails(String jobName, Integer buildNumber) {
+  private ScmDetails getGitDetails(String jobName, Long buildNumber) {
     return retrySupport.retry(
         () -> {
           try {
-            return jenkinsClient.getGitDetails(encode(jobName), buildNumber);
+            return Retrofit2SyncCall.execute(
+                jenkinsClient.getGitDetails(encode(jobName), buildNumber));
           } catch (SpinnakerConversionException e) {
             // assuming that a conversion error is unlikely to succeed on retry
             log.warn(
@@ -221,18 +223,20 @@ public class JenkinsService implements BuildOperations, BuildProperties {
           }
         },
         10,
-        1000,
+        Duration.ofMillis(1000),
         false);
   }
 
   public Build getLatestBuild(String jobName) {
-    return circuitBreaker.executeSupplier(() -> jenkinsClient.getLatestBuild(encode(jobName)));
+    return circuitBreaker.executeSupplier(
+        () -> Retrofit2SyncCall.execute(jenkinsClient.getLatestBuild(encode(jobName))));
   }
 
   @Override
-  public QueuedJob queuedBuild(String master, int item) {
+  public QueuedJob queuedBuild(String master, long item) {
     try {
-      return circuitBreaker.executeSupplier(() -> jenkinsClient.getQueuedItem(item));
+      return circuitBreaker.executeSupplier(
+          () -> Retrofit2SyncCall.execute(jenkinsClient.getQueuedItem(item)));
     } catch (SpinnakerHttpException e) {
       if (e.getResponseCode() == NOT_FOUND.value()) {
         throw new NotFoundException(
@@ -242,29 +246,34 @@ public class JenkinsService implements BuildOperations, BuildProperties {
     }
   }
 
-  public Response build(String jobName) {
+  public Response<ResponseBody> build(String jobName) {
     return circuitBreaker.executeSupplier(
-        () -> jenkinsClient.build(encode(jobName), "", getCrumb()));
+        () -> Retrofit2SyncCall.execute(jenkinsClient.build(encode(jobName), "", getCrumb())));
   }
 
-  public Response buildWithParameters(String jobName, Map<String, String> queryParams) {
+  public Response<ResponseBody> buildWithParameters(
+      String jobName, Map<String, String> queryParams) {
     return circuitBreaker.executeSupplier(
-        () -> jenkinsClient.buildWithParameters(encode(jobName), queryParams, "", getCrumb()));
+        () ->
+            Retrofit2SyncCall.execute(
+                jenkinsClient.buildWithParameters(encode(jobName), queryParams, "", getCrumb())));
   }
 
   @Override
-  public void updateBuild(String jobName, Integer buildNumber, UpdatedBuild updatedBuild) {
+  public void updateBuild(String jobName, Long buildNumber, UpdatedBuild updatedBuild) {
     if (updatedBuild.getDescription() != null) {
       circuitBreaker.executeRunnable(
           () ->
-              jenkinsClient.submitDescription(
-                  encode(jobName), buildNumber, updatedBuild.getDescription(), getCrumb()));
+              Retrofit2SyncCall.execute(
+                  jenkinsClient.submitDescription(
+                      encode(jobName), buildNumber, updatedBuild.getDescription(), getCrumb())));
     }
   }
 
   @Override
   public JobConfig getJobConfig(String jobName) {
-    return circuitBreaker.executeSupplier(() -> jenkinsClient.getJobConfig(encode(jobName)));
+    return circuitBreaker.executeSupplier(
+        () -> Retrofit2SyncCall.execute(jenkinsClient.getJobConfig(encode(jobName))));
   }
 
   @Override
@@ -276,7 +285,7 @@ public class JenkinsService implements BuildOperations, BuildProperties {
     try {
       String path = getArtifactPathFromBuild(job, build.getNumber(), fileName);
       try (InputStream propertyStream =
-          this.getPropertyFile(job, build.getNumber(), path).getBody().in()) {
+          this.getPropertyFile(job, build.getNumber(), path).byteStream()) {
         if (fileName.endsWith(".yml") || fileName.endsWith(".yaml")) {
           Yaml yml = new Yaml(new SafeConstructor());
           map = yml.load(propertyStream);
@@ -298,7 +307,7 @@ public class JenkinsService implements BuildOperations, BuildProperties {
     return map;
   }
 
-  private String getArtifactPathFromBuild(String job, int buildNumber, String fileName) {
+  private String getArtifactPathFromBuild(String job, long buildNumber, String fileName) {
     return retrySupport.retry(
         () ->
             this.getBuild(job, buildNumber).getArtifacts().stream()
@@ -315,17 +324,19 @@ public class JenkinsService implements BuildOperations, BuildProperties {
                       return new ArtifactNotFoundException(serviceName, job, buildNumber, fileName);
                     }),
         5,
-        2000,
+        Duration.ofMillis(2000),
         false);
   }
 
-  private Response getPropertyFile(String jobName, Integer buildNumber, String fileName) {
+  private ResponseBody getPropertyFile(String jobName, Long buildNumber, String fileName) {
     return retrySupport.retry(
         () -> {
           try {
-            return jenkinsClient.getPropertyFile(encode(jobName), buildNumber, fileName);
+            return Retrofit2SyncCall.execute(
+                jenkinsClient.getPropertyFile(encode(jobName), buildNumber, fileName));
           } catch (SpinnakerHttpException e) {
             if (e.getResponseCode() == 404 || e.getResponseCode() >= 500) {
+              e.setRetryable(true); // 404 not retryable by default
               throw e; // retry on 404 and 5XX
             }
             e.setRetryable(false); // disable retry
@@ -342,14 +353,17 @@ public class JenkinsService implements BuildOperations, BuildProperties {
         false);
   }
 
-  public Response stopRunningBuild(String jobName, Integer buildNumber) {
+  public ResponseBody stopRunningBuild(String jobName, Long buildNumber) {
     return circuitBreaker.executeSupplier(
-        () -> jenkinsClient.stopRunningBuild(encode(jobName), buildNumber, "", getCrumb()));
+        () ->
+            Retrofit2SyncCall.execute(
+                jenkinsClient.stopRunningBuild(encode(jobName), buildNumber, "", getCrumb())));
   }
 
-  public Response stopQueuedBuild(String queuedBuild) {
+  public ResponseBody stopQueuedBuild(String queuedBuild) {
     return circuitBreaker.executeSupplier(
-        () -> jenkinsClient.stopQueuedBuild(queuedBuild, "", getCrumb()));
+        () ->
+            Retrofit2SyncCall.execute(jenkinsClient.stopQueuedBuild(queuedBuild, "", getCrumb())));
   }
 
   @Override

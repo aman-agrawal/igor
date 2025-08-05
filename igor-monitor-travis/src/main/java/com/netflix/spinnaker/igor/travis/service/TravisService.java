@@ -50,6 +50,7 @@ import com.netflix.spinnaker.igor.travis.client.model.v3.V3Build;
 import com.netflix.spinnaker.igor.travis.client.model.v3.V3Builds;
 import com.netflix.spinnaker.igor.travis.client.model.v3.V3Job;
 import com.netflix.spinnaker.igor.travis.client.model.v3.V3Log;
+import com.netflix.spinnaker.kork.retrofit.Retrofit2SyncCall;
 import com.netflix.spinnaker.kork.retrofit.exceptions.SpinnakerHttpException;
 import com.netflix.spinnaker.kork.retrofit.exceptions.SpinnakerServerException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
@@ -142,7 +143,7 @@ public class TravisService implements BuildOperations, BuildProperties {
   public List<GenericGitRevision> getGenericGitRevisions(String inputRepoSlug, GenericBuild build) {
     String repoSlug = cleanRepoSlug(inputRepoSlug);
     if (StringUtils.isNumeric(build.getId())) {
-      V3Build v3build = getV3Build(Integer.parseInt(build.getId()));
+      V3Build v3build = getV3Build(Long.parseLong(build.getId()));
       if (v3build.getCommit() != null) {
         return Collections.singletonList(
             v3build
@@ -169,14 +170,15 @@ public class TravisService implements BuildOperations, BuildProperties {
   }
 
   @Override
-  public GenericBuild getGenericBuild(final String inputRepoSlug, final int buildNumber) {
+  public GenericBuild getGenericBuild(final String inputRepoSlug, final long buildNumber) {
     String repoSlug = cleanRepoSlug(inputRepoSlug);
     Build build = getBuild(repoSlug, buildNumber);
     return getGenericBuild(build, repoSlug);
   }
 
   @Override
-  public int triggerBuildWithParameters(String inputRepoSlug, Map<String, String> queryParameters) {
+  public long triggerBuildWithParameters(
+      String inputRepoSlug, Map<String, String> queryParameters) {
     String repoSlug = cleanRepoSlug(inputRepoSlug);
     String branch = branchFromRepoSlug(inputRepoSlug);
     RepoRequest repoRequest = new RepoRequest(branch.isEmpty() ? "master" : branch);
@@ -187,7 +189,8 @@ public class TravisService implements BuildOperations, BuildProperties {
     }
     repoRequest.setConfig(new Config(queryParameters));
     final TriggerResponse triggerResponse =
-        travisClient.triggerBuild(getAccessToken(), repoSlug, repoRequest);
+        Retrofit2SyncCall.execute(
+            travisClient.triggerBuild(getAccessToken(), repoSlug, repoRequest));
     if (triggerResponse.getRemainingRequests() > 0) {
       log.debug(
           "{}: remaining requests: {}",
@@ -211,16 +214,17 @@ public class TravisService implements BuildOperations, BuildProperties {
     return permissions;
   }
 
-  public V3Build getV3Build(int buildId) {
-    return travisClient.v3build(
-        getAccessToken(), buildId, addLogCompleteIfApplicable("build.commit"));
+  public V3Build getV3Build(long buildId) {
+    return Retrofit2SyncCall.execute(
+        travisClient.v3build(
+            getAccessToken(), buildId, addLogCompleteIfApplicable("build.commit")));
   }
 
-  public Builds getBuilds(String repoSlug, int buildNumber) {
-    return travisClient.builds(getAccessToken(), repoSlug, buildNumber);
+  public Builds getBuilds(String repoSlug, long buildNumber) {
+    return Retrofit2SyncCall.execute(travisClient.builds(getAccessToken(), repoSlug, buildNumber));
   }
 
-  public Build getBuild(String repoSlug, int buildNumber) {
+  public Build getBuild(String repoSlug, long buildNumber) {
     Builds builds = getBuilds(repoSlug, buildNumber);
     return !builds.getBuilds().isEmpty() ? builds.getBuilds().get(0) : null;
   }
@@ -229,7 +233,7 @@ public class TravisService implements BuildOperations, BuildProperties {
   public Map<String, Object> getBuildProperties(
       String inputRepoSlug, GenericBuild build, String fileName) {
     try {
-      V3Build v3build = getV3Build(Integer.parseInt(build.getId()));
+      V3Build v3build = getV3Build(Long.parseLong(build.getId()));
       return PropertyParser.extractPropertiesFromLog(getLog(v3build));
     } catch (Exception e) {
       log.error("Unable to get igorProperties '{}'", kv("job", inputRepoSlug), e);
@@ -241,8 +245,13 @@ public class TravisService implements BuildOperations, BuildProperties {
     // Tags are hard to identify, no filters exist.
     // Increasing the limit to increase the odds for finding some tag builds.
     V3Builds builds =
-        travisClient.v3buildsByEventType(
-            getAccessToken(), repoSlug, "push", buildResultLimit * 2, addLogCompleteIfApplicable());
+        Retrofit2SyncCall.execute(
+            travisClient.v3buildsByEventType(
+                getAccessToken(),
+                repoSlug,
+                "push",
+                buildResultLimit * 2,
+                addLogCompleteIfApplicable()));
     return builds.getBuilds().stream()
         .filter(build -> build.getCommit().isTag())
         .filter(this::isLogReady)
@@ -262,29 +271,32 @@ public class TravisService implements BuildOperations, BuildProperties {
         return getTagBuilds(repoSlug);
       case branch:
         builds =
-            travisClient.v3builds(
-                getAccessToken(),
-                repoSlug,
-                branch,
-                "push,api",
-                buildResultLimit,
-                addLogCompleteIfApplicable());
+            Retrofit2SyncCall.execute(
+                travisClient.v3builds(
+                    getAccessToken(),
+                    repoSlug,
+                    branch,
+                    "push,api",
+                    buildResultLimit,
+                    addLogCompleteIfApplicable()));
         break;
       case pull_request:
         builds =
-            travisClient.v3builds(
-                getAccessToken(),
-                repoSlug,
-                branch,
-                "pull_request",
-                buildResultLimit,
-                addLogCompleteIfApplicable());
+            Retrofit2SyncCall.execute(
+                travisClient.v3builds(
+                    getAccessToken(),
+                    repoSlug,
+                    branch,
+                    "pull_request",
+                    buildResultLimit,
+                    addLogCompleteIfApplicable()));
         break;
       case unknown:
       default:
         builds =
-            travisClient.v3builds(
-                getAccessToken(), repoSlug, buildResultLimit, addLogCompleteIfApplicable());
+            Retrofit2SyncCall.execute(
+                travisClient.v3builds(
+                    getAccessToken(), repoSlug, buildResultLimit, addLogCompleteIfApplicable()));
     }
 
     return builds.getBuilds().stream()
@@ -302,14 +314,15 @@ public class TravisService implements BuildOperations, BuildProperties {
                 IntStream.rangeClosed(1, calculatePagination(limit))
                     .mapToObj(
                         page ->
-                            travisClient.jobs(
-                                getAccessToken(),
-                                Arrays.stream(buildStatesFilter)
-                                    .map(TravisBuildState::toString)
-                                    .collect(Collectors.joining(",")),
-                                addLogCompleteIfApplicable("job.build"),
-                                getLimit(page, limit),
-                                (page - 1) * TRAVIS_JOB_RESULT_LIMIT))
+                            Retrofit2SyncCall.execute(
+                                travisClient.jobs(
+                                    getAccessToken(),
+                                    Arrays.stream(buildStatesFilter)
+                                        .map(TravisBuildState::toString)
+                                        .collect(Collectors.joining(",")),
+                                    addLogCompleteIfApplicable("job.build"),
+                                    getLimit(page, limit),
+                                    (page - 1) * TRAVIS_JOB_RESULT_LIMIT)))
                     .flatMap(v3jobs -> v3jobs.getJobs().stream())
                     .sorted(Comparator.comparing(V3Job::getId))
                     .collect(Collectors.toList()),
@@ -363,8 +376,9 @@ public class TravisService implements BuildOperations, BuildProperties {
     try {
       log.info("fetching builds for repo: {}", repoSlug);
       return Either.left(
-          travisClient.v3builds(
-              getAccessToken(), repoSlug, buildResultLimit, addLogCompleteIfApplicable()));
+          Retrofit2SyncCall.execute(
+              travisClient.v3builds(
+                  getAccessToken(), repoSlug, buildResultLimit, addLogCompleteIfApplicable())));
     } catch (Exception e) {
       log.error("Failed to fetch builds for repo {}. Skipping. {}.", repoSlug, e.getMessage());
       return Either.right(e);
@@ -438,7 +452,7 @@ public class TravisService implements BuildOperations, BuildProperties {
       return Optional.of(cachedLog);
     }
     try {
-      V3Log v3Log = travisClient.jobLog(getAccessToken(), jobId);
+      V3Log v3Log = Retrofit2SyncCall.execute(travisClient.jobLog(getAccessToken(), jobId));
       if (v3Log != null && v3Log.isReady()) {
         log.info("Log for jobId {} was ready, caching it", jobId);
         travisCache.setJobLog(groupKey, jobId, v3Log.getContent());
@@ -498,7 +512,9 @@ public class TravisService implements BuildOperations, BuildProperties {
   @Override
   public JobConfiguration getJobConfig(String inputRepoSlug) {
     String repoSlug = cleanRepoSlug(inputRepoSlug);
-    V3Builds builds = travisClient.v3builds(getAccessToken(), repoSlug, 1, "job.config");
+    V3Builds builds =
+        Retrofit2SyncCall.execute(
+            travisClient.v3builds(getAccessToken(), repoSlug, 1, "job.config"));
     final Optional<Config> config =
         builds.getBuilds().stream()
             .findFirst()
@@ -523,11 +539,12 @@ public class TravisService implements BuildOperations, BuildProperties {
   }
 
   @Override
-  public Map<String, Integer> queuedBuild(String master, int queueId) {
-    Map<String, Integer> queuedJob = travisCache.getQueuedJob(groupKey, queueId);
+  public Map<String, Long> queuedBuild(String master, long queueId) {
+    Map<String, Long> queuedJob = travisCache.getQueuedJob(groupKey, queueId);
     Request requestResponse =
-        travisClient.request(
-            getAccessToken(), queuedJob.get("repositoryId"), queuedJob.get("requestId"));
+        Retrofit2SyncCall.execute(
+            travisClient.request(
+                getAccessToken(), queuedJob.get("repositoryId"), queuedJob.get("requestId")));
     if (!requestResponse.getBuilds().isEmpty()) {
       log.info(
           "{}: Build found: [{}:{}] . Removing {} from {} travisCache.",
@@ -537,7 +554,7 @@ public class TravisService implements BuildOperations, BuildProperties {
           queueId,
           groupKey);
       travisCache.removeQuededJob(groupKey, queueId);
-      LinkedHashMap<String, Integer> map = new LinkedHashMap<>(1);
+      LinkedHashMap<String, Long> map = new LinkedHashMap<>(1);
       map.put("number", requestResponse.getBuilds().get(0).getNumber());
       return map;
     }
@@ -546,7 +563,7 @@ public class TravisService implements BuildOperations, BuildProperties {
 
   public void syncRepos() {
     try {
-      travisClient.usersSync(getAccessToken(), new EmptyObject());
+      Retrofit2SyncCall.execute(travisClient.usersSync(getAccessToken(), new EmptyObject()));
     } catch (SpinnakerServerException e) {
       log.error(
           "synchronizing travis repositories for {} failed with error: {}",
@@ -609,7 +626,7 @@ public class TravisService implements BuildOperations, BuildProperties {
   }
 
   private void setAccessToken() {
-    this.accessToken = travisClient.accessToken(gitHubAuth);
+    this.accessToken = Retrofit2SyncCall.execute(travisClient.accessToken(gitHubAuth));
   }
 
   private String getAccessToken() {

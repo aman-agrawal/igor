@@ -31,6 +31,7 @@ import com.netflix.spinnaker.igor.service.BuildOperations;
 import com.netflix.spinnaker.igor.service.BuildProperties;
 import com.netflix.spinnaker.igor.travis.client.logparser.PropertyParser;
 import com.netflix.spinnaker.kork.core.RetrySupport;
+import com.netflix.spinnaker.kork.retrofit.Retrofit2SyncCall;
 import com.netflix.spinnaker.kork.retrofit.exceptions.SpinnakerHttpException;
 import com.netflix.spinnaker.kork.retrofit.exceptions.SpinnakerNetworkException;
 import com.netflix.spinnaker.kork.retrofit.exceptions.SpinnakerServerException;
@@ -78,13 +79,13 @@ public class GitlabCiService implements BuildOperations, BuildProperties {
   }
 
   @Override
-  public GenericBuild getGenericBuild(String projectId, int pipelineId) {
-    Project project = client.getProject(projectId);
+  public GenericBuild getGenericBuild(String projectId, long pipelineId) {
+    Project project = Retrofit2SyncCall.execute(client.getProject(projectId));
     if (project == null) {
       log.error("Could not find Gitlab CI Project with projectId={}", projectId);
       return null;
     }
-    Pipeline pipeline = client.getPipeline(projectId, pipelineId);
+    Pipeline pipeline = Retrofit2SyncCall.execute(client.getPipeline(projectId, pipelineId));
     if (pipeline == null) {
       return null;
     }
@@ -94,7 +95,8 @@ public class GitlabCiService implements BuildOperations, BuildProperties {
 
   @Override
   public List<Pipeline> getBuilds(String job) {
-    return this.client.getPipelineSummaries(job, this.hostConfig.getDefaultHttpPageLength());
+    return Retrofit2SyncCall.execute(
+        this.client.getPipelineSummaries(job, this.hostConfig.getDefaultHttpPageLength()));
   }
 
   @Override
@@ -103,7 +105,7 @@ public class GitlabCiService implements BuildOperations, BuildProperties {
   }
 
   @Override
-  public int triggerBuildWithParameters(String job, Map<String, String> queryParameters) {
+  public long triggerBuildWithParameters(String job, Map<String, String> queryParameters) {
     throw new UnsupportedOperationException();
   }
 
@@ -131,9 +133,9 @@ public class GitlabCiService implements BuildOperations, BuildProperties {
   }
 
   // Gets a pipeline's jobs along with any child pipeline jobs (bridges)
-  private List<Job> getJobsWithBridges(String projectId, Integer pipelineId) {
-    List<Job> jobs = this.client.getJobs(projectId, pipelineId);
-    List<Bridge> bridges = this.client.getBridges(projectId, pipelineId);
+  private List<Job> getJobsWithBridges(String projectId, Long pipelineId) {
+    List<Job> jobs = Retrofit2SyncCall.execute(this.client.getJobs(projectId, pipelineId));
+    List<Bridge> bridges = Retrofit2SyncCall.execute(this.client.getBridges(projectId, pipelineId));
     bridges.parallelStream()
         .filter(
             bridge -> {
@@ -145,17 +147,20 @@ public class GitlabCiService implements BuildOperations, BuildProperties {
             })
         .forEach(
             bridge -> {
-              jobs.addAll(this.client.getJobs(projectId, bridge.getDownstreamPipeline().getId()));
+              jobs.addAll(
+                  Retrofit2SyncCall.execute(
+                      this.client.getJobs(projectId, bridge.getDownstreamPipeline().getId())));
             });
     return jobs;
   }
 
-  private Map<String, Object> getPropertyFileFromLog(String projectId, Integer pipelineId) {
+  private Map<String, Object> getPropertyFileFromLog(String projectId, Long pipelineId) {
     Map<String, Object> properties = new HashMap<>();
     return retrySupport.retry(
         () -> {
           try {
-            Pipeline pipeline = this.client.getPipeline(projectId, pipelineId);
+            Pipeline pipeline =
+                Retrofit2SyncCall.execute(this.client.getPipeline(projectId, pipelineId));
             PipelineStatus status = pipeline.getStatus();
             if (status != PipelineStatus.running) {
               log.error(
@@ -168,7 +173,10 @@ public class GitlabCiService implements BuildOperations, BuildProperties {
             // and any jobs of child pipeline's to parse all logs for the pipeline
             List<Job> jobs = getJobsWithBridges(projectId, pipelineId);
             for (Job job : jobs) {
-              InputStream logStream = this.client.getJobLog(projectId, job.getId()).getBody().in();
+              InputStream logStream =
+                  Retrofit2SyncCall.execute(this.client.getJobLog(projectId, job.getId()))
+                      .source()
+                      .inputStream();
               String log = new String(logStream.readAllBytes(), StandardCharsets.UTF_8);
               Map<String, Object> jobProperties = PropertyParser.extractPropertiesFromLog(log);
               properties.putAll(jobProperties);
@@ -182,6 +190,7 @@ public class GitlabCiService implements BuildOperations, BuildProperties {
           } catch (SpinnakerHttpException e) {
             // retry on 404 and 5XX
             if (e.getResponseCode() == 404 || e.getResponseCode() >= 500) {
+              e.setRetryable(true); // 404 not retryable by default
               throw e;
             }
             e.setRetryable(false);
@@ -201,7 +210,8 @@ public class GitlabCiService implements BuildOperations, BuildProperties {
   }
 
   public List<Pipeline> getPipelines(final Project project, int pageSize) {
-    return client.getPipelineSummaries(String.valueOf(project.getId()), pageSize);
+    return Retrofit2SyncCall.execute(
+        client.getPipelineSummaries(String.valueOf(project.getId()), pageSize));
   }
 
   public List<Pipeline> getPipelines(final Project project) {
@@ -214,11 +224,12 @@ public class GitlabCiService implements BuildOperations, BuildProperties {
 
   private List<Project> getProjectsRec(List<Project> projects, int page) {
     List<Project> slice =
-        client.getProjects(
-            hostConfig.getLimitByMembership(),
-            hostConfig.getLimitByOwnership(),
-            page,
-            hostConfig.getDefaultHttpPageLength());
+        Retrofit2SyncCall.execute(
+            client.getProjects(
+                hostConfig.getLimitByMembership(),
+                hostConfig.getLimitByOwnership(),
+                page,
+                hostConfig.getDefaultHttpPageLength()));
     if (slice.isEmpty()) {
       return projects;
     } else {

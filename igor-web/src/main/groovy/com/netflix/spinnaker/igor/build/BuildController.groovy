@@ -46,7 +46,8 @@ import org.springframework.web.bind.annotation.RequestMethod
 import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.servlet.HandlerMapping
-import retrofit.http.Query
+import retrofit2.Response
+import retrofit2.http.Query
 
 import javax.annotation.Nullable
 import javax.servlet.http.HttpServletRequest
@@ -76,7 +77,7 @@ class BuildController {
   }
 
   @Nullable
-  private GenericBuild jobStatus(BuildOperations buildService, String master, String job, Integer buildNumber) {
+  private GenericBuild jobStatus(BuildOperations buildService, String master, String job, Long buildNumber) {
     GenericBuild build = buildService.getGenericBuild(job, buildNumber)
     if (!build)
       return null
@@ -100,7 +101,7 @@ class BuildController {
   @RequestMapping(value = '/builds/status/{buildNumber}/{master:.+}/**')
   @PreAuthorize("hasPermission(#master, 'BUILD_SERVICE', 'READ')")
   GenericBuild getJobStatus(@PathVariable String master, @PathVariable
-    Integer buildNumber, HttpServletRequest request) {
+    Long buildNumber, HttpServletRequest request) {
     def job = ((String) request.getAttribute(
       HandlerMapping.PATH_WITHIN_HANDLER_MAPPING_ATTRIBUTE)).split('/').drop(5).join('/')
     def buildService = getBuildService(master)
@@ -111,7 +112,7 @@ class BuildController {
   @PreAuthorize("hasPermission(#master, 'BUILD_SERVICE', 'READ')")
   GenericBuild getJobStatus(
     @PathVariable String master,
-    @PathVariable Integer buildNumber,
+    @PathVariable Long buildNumber,
     @RequestParam("job") String job) {
     def buildService = getBuildService(master)
     return jobStatus(buildService, master, job, buildNumber)
@@ -120,7 +121,7 @@ class BuildController {
   @RequestMapping(value = '/builds/artifacts/{buildNumber}/{master:.+}/**')
   @PreAuthorize("hasPermission(#master, 'BUILD_SERVICE', 'READ')")
   List<Artifact> getBuildResults(@PathVariable String master, @PathVariable
-    Integer buildNumber, @Query("propertyFile") String propertyFile, HttpServletRequest request) {
+    Long buildNumber, @Query("propertyFile") String propertyFile, HttpServletRequest request) {
     def job = ((String) request.getAttribute(
       HandlerMapping.PATH_WITHIN_HANDLER_MAPPING_ATTRIBUTE)).split('/').drop(5).join('/')
     def buildService = getBuildService(master)
@@ -136,7 +137,7 @@ class BuildController {
   @RequestMapping(value = '/builds/artifacts/{buildNumber}/{master}')
   @PreAuthorize("hasPermission(#master, 'BUILD_SERVICE', 'READ')")
   List<Artifact> getBuildResults(@PathVariable String master, @PathVariable
-    Integer buildNumber, @RequestParam("job") String job ,@Query("propertyFile") String propertyFile) {
+    Long buildNumber, @RequestParam("job") String job ,@Query("propertyFile") String propertyFile) {
     def buildService = getBuildService(master)
     GenericBuild build = jobStatus(buildService, master, job, buildNumber)
     if (build && buildService instanceof BuildProperties && artifactExtractor != null) {
@@ -148,7 +149,7 @@ class BuildController {
 
   @RequestMapping(value = '/builds/queue/{master}/{item}')
   @PreAuthorize("hasPermission(#master, 'BUILD_SERVICE', 'READ')")
-  Object getQueueLocation(@PathVariable String master, @PathVariable int item) {
+  Object getQueueLocation(@PathVariable String master, @PathVariable long item) {
     def buildService = getBuildService(master)
     return buildService.queuedBuild(master, item)
   }
@@ -168,7 +169,7 @@ class BuildController {
     @PathVariable("name") String master,
     @PathVariable String jobName,
     @PathVariable String queuedBuild,
-    @PathVariable Integer buildNumber) {
+    @PathVariable Long buildNumber) {
     stopJob(master, buildNumber, jobName, queuedBuild)
     "true"
   }
@@ -179,14 +180,14 @@ class BuildController {
     @PathVariable String master,
     @RequestParam String jobName,
     @PathVariable String queuedBuild,
-    @PathVariable Integer buildNumber) {
+    @PathVariable Long buildNumber) {
 
     stopJob(master, buildNumber, jobName, queuedBuild)
     "true"
   }
 
 
-  void stopJob(String master, int buildNumber, String jobName, String queuedBuild) {
+  void stopJob(String master, long buildNumber, String jobName, String queuedBuild) {
     def buildService = getBuildService(master)
     if (buildService instanceof JenkinsService) {
       // Jobs that haven't been started yet won't have a buildNumber
@@ -216,7 +217,7 @@ class BuildController {
   @PreAuthorize("hasPermission(#master, 'BUILD_SERVICE', 'WRITE')")
   void update(
     @PathVariable("name") String master,
-    @PathVariable("buildNumber") Integer buildNumber,
+    @PathVariable("buildNumber") Long buildNumber,
     @RequestBody UpdatedBuild updatedBuild,
     HttpServletRequest request
   ) {
@@ -260,7 +261,7 @@ class BuildController {
     try {
       def buildService = getBuildService(master)
       if (buildService instanceof JenkinsService) {
-        def response
+        Response response
         JenkinsService jenkinsService = (JenkinsService) buildService
         JobConfig jobConfig = jenkinsService.getJobConfig(job)
         if (!jobConfig.buildable) {
@@ -282,18 +283,17 @@ class BuildController {
           throw new RuntimeException("job : ${job}, passing params to a job which doesn't need them")
         }
 
-        if (response.status != 201) {
+        if (response.code() != 201) {
           throw new BuildJobError("Received a non-201 status when submitting job '${job}' to master '${master}'")
         }
 
         log.info("Submitted build job '{}'", kv("job", job))
-        def locationHeader = response.headers.find { it.name.toLowerCase() == "location" }
+        def locationHeader = response.headers().get("location")
         if (!locationHeader) {
           throw new QueuedJobDeterminationError("Could not find Location header for job '${job}'")
         }
-        def queuedLocation = locationHeader.value
 
-        buildNumber = queuedLocation.split('/')[-1]
+        buildNumber = locationHeader.split('/')[-1]
       } else {
         buildNumber = buildService.triggerBuildWithParameters(job, requestParams)
       }
@@ -336,7 +336,7 @@ class BuildController {
   @PreAuthorize("hasPermission(#master, 'BUILD_SERVICE', 'READ')")
   Map<String, Object> getProperties(
     @PathVariable String master,
-    @PathVariable Integer buildNumber, @PathVariable
+    @PathVariable Long buildNumber, @PathVariable
       String fileName, HttpServletRequest request) {
     def job = ((String) request.getAttribute(
       HandlerMapping.PATH_WITHIN_HANDLER_MAPPING_ATTRIBUTE)).split('/').drop(6).join('/')
@@ -354,7 +354,7 @@ class BuildController {
   @PreAuthorize("hasPermission(#master, 'BUILD_SERVICE', 'READ')")
   Map<String, Object> getProperties(
     @PathVariable String master,
-    @PathVariable Integer buildNumber, @PathVariable
+    @PathVariable Long buildNumber, @PathVariable
       String fileName, @RequestParam("job") String job) {
     def buildService = getBuildService(master)
     if (buildService instanceof BuildProperties) {
